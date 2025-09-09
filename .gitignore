@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+Cargo.lock
+data/*.db
+data/*.key
+config/local.key
+.DS_Store
