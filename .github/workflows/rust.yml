@@ -2,21 +2,60 @@ name: Rust
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "master" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main", "master" ]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-
+  build-and-test:
     runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v4
+
+    - name: Install stable toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+        override: true
+
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
     - name: Build
-      run: cargo build --verbose
+      run: cargo build --verbose --all-features
+
     - name: Run tests
-      run: cargo test --verbose
+      run: cargo test --verbose --all-features
+
+    - name: Check formatting
+      run: cargo fmt --all -- --check
+
+    - name: Run Clippy
+      run: cargo clippy --all-targets --all-features -- -D warnings
+
+    - name: Install cargo-deny
+      run: cargo install cargo-deny
+
+    - name: Run cargo-deny
+      run: cargo deny check
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install cargo-deny
+      run: cargo install cargo-deny
+
+    - name: Run cargo-deny audit
+      run: cargo deny check advisories
