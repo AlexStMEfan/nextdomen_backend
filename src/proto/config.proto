@@ -1,0 +1,187 @@
+// proto/config.proto
+
+syntax = "proto3";
+
+package config;
+
+import "google/protobuf/duration.proto";
+
+option go_package = "github.com/yourorg/nextdomen_backend/proto";
+option java_package = "com.yourorg.nextdomen.config";
+
+// Основная конфигурация сервиса
+message AppConfig {
+  // Путь к файлу базы данных
+  string db_path = 1;
+
+  // Ключ шифрования (в hex)
+  string master_key_hex = 2;
+
+  // Серверы API
+  ServerConfig web_server = 3;
+  ServerConfig grpc_server = 4;
+  LdapServerConfig ldap_server = 5;
+
+  // Настройки безопасности
+  SecurityConfig security = 6;
+
+  // Логирование
+  LoggingConfig logging = 7;
+
+  // Директории
+  PathsConfig paths = 8;
+
+  // Мониторинг / метрики (опционально)
+  MetricsConfig metrics = 9;
+}
+
+// Конфигурация HTTP/gRPC сервера
+message ServerConfig {
+  // Адрес привязки (например, "127.0.0.1:8080")
+  string address = 1;
+
+  // Включить HTTPS/TLS
+  bool enable_tls = 2;
+
+  // Пути к сертификатам
+  TlsConfig tls = 3;
+
+  // Максимальный размер тела запроса (в байтах)
+  int64 max_request_size = 4;
+
+  // Таймауты
+  google.protobuf.Duration request_timeout = 5;
+  google.protobuf.Duration idle_timeout = 6;
+}
+
+// Конфигурация LDAP-сервера
+message LdapServerConfig {
+  // Адрес (например, "0.0.0.0:389")
+  string address = 1;
+
+  // Включить LDAPS (TLS)
+  bool enable_tls = 2;
+
+  // TLS для LDAPS
+  TlsConfig tls = 3;
+
+  // Разрешить анонимные BIND-запросы
+  bool allow_anonymous_bind = 4;
+
+  // Корневой DN для поиска
+  string base_dn = 5;
+}
+
+// Настройки безопасности
+message SecurityConfig {
+  // JWT конфигурация
+  JwtConfig jwt = 1;
+
+  // Парольные политики
+  PasswordPolicy password_policy = 2;
+
+  // Аудит
+  AuditConfig audit = 3;
+}
+
+// JWT конфигурация
+message JwtConfig {
+  // Алгоритм: HS256, RS256, ES256
+  string algorithm = 1; // например, "RS256"
+
+  // Секрет (для HMAC)
+  string secret_key = 2; // игнорируется, если используется RSA
+
+  // Путь к приватному ключу (PEM)
+  string private_key_path = 3;
+
+  // Путь к публичному ключу (PEM)
+  string public_key_path = 4;
+
+  // Время жизни токена
+  google.protobuf.Duration token_expiry = 5; // например, 24h
+}
+
+// Политика паролей
+message PasswordPolicy {
+  int32 min_length = 1;
+  bool require_uppercase = 2;
+  bool require_lowercase = 3;
+  bool require_digits = 4;
+  bool require_special_chars = 5;
+  int32 max_age_days = 6; // смена каждые N дней
+  int32 history_count = 7; // не повторять последние N паролей
+}
+
+// Конфигурация TLS
+message TlsConfig {
+  // Путь к сертификату (PEM)
+  string cert_file = 1;
+
+  // Путь к приватному ключу (PEM)
+  string key_file = 2;
+
+  // CA bundle (если нужно проверять клиентов)
+  string ca_cert_file = 3;
+
+  // Включить mTLS (проверка клиента)
+  bool client_auth_required = 4;
+}
+
+// Конфигурация логирования
+message LoggingConfig {
+  enum Level {
+    DEBUG = 0;
+    INFO = 1;
+    WARN = 2;
+    ERROR = 3;
+  }
+
+  Level level = 1;
+  bool enable_json_output = 2;
+  string log_file = 3; // путь к файлу логов, "" = stdout
+  bool enable_tracing = 4; // OpenTelemetry
+}
+
+// Пути к файлам
+message PathsConfig {
+  // Путь к директории с ключами
+  string keys_dir = 1;
+
+  // Путь к директории с сертификатами
+  string certs_dir = 2;
+
+  // Путь к временным файлам
+  string temp_dir = 3;
+}
+
+// Метрики и мониторинг
+message MetricsConfig {
+  // Адрес Prometheus (например, ":9090/metrics")
+  string prometheus_endpoint = 1;
+
+  // Включить экспорт метрик
+  bool enabled = 2;
+}
+
+// Конфигурация аудита
+message AuditConfig {
+  enum Backend {
+    MEMORY = 0;     // временный
+    FILE = 1;       // запись в файл
+    DATABASE = 2;   // SQLite/PostgreSQL
+    KAFKA = 3;      // потоковая передача
+  }
+
+  Backend backend = 1;
+  string file_path = 2; // если FILE
+  string database_url = 3; // если DATABASE
+  KafkaConfig kafka = 4; // если KAFKA
+}
+
+// Конфигурация Kafka (опционально)
+message KafkaConfig {
+  repeated string brokers = 1; // ["localhost:9092"]
+  string topic = 2;
+  string client_id = 3;
+}

@@ -2,8 +2,6 @@
 
 use crate::models::*;
 use crate::directory_service::DirectoryService;
-use crate::ldap::asn1::Asn1;
-use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub enum Filter {
@@ -11,6 +9,13 @@ pub enum Filter {
     GreaterOrEqual(String, String),
     LessOrEqual(String, String),
     ApproxMatch(String, String),
+    Substring { attr: String, initial: Option<String>, any: Vec<String>, final_: Option<String> },
+    Extensible {
+        attr: String,
+        rule: Option<String>,
+        dn_attrs: bool,
+        value: String,
+    },
     And(Vec<Filter>),
     Or(Vec<Filter>),
     Not(Box<Filter>),
@@ -18,68 +23,101 @@ pub enum Filter {
 }
 
 impl Filter {
-    /// Разбирает фильтр из строки (например, "(sAMAccountName=jdoe)")
     pub fn parse(s: &str) -> Result<Self, LdapFilterError> {
         let s = s.trim();
         if !s.starts_with('(') || !s.ends_with(')') {
             return Err(LdapFilterError::InvalidSyntax);
         }
-
-        let inner = &s[1..s.len() - 1];
-
-        if inner.is_empty() {
-            return Err(LdapFilterError::InvalidSyntax);
-        }
-
-        Self::parse_inner(inner)
+        Self::parse_inner(&s[1..s.len() - 1])
     }
 
     fn parse_inner(s: &str) -> Result<Self, LdapFilterError> {
         match s.chars().next() {
-            Some('&') => {
-                Self::parse_list(&s[1..], |items| Ok(Filter::And(items)))
-            }
-            Some('|') => {
-                Self::parse_list(&s[1..], |items| Ok(Filter::Or(items)))
-            }
-            Some('!') => {
-                let filter = Self::parse_inner(&s[1..])?;
-                Ok(Filter::Not(Box::new(filter)))
-            }
-            _ => {
-                // Простой фильтр: attr=value
-                if let Some(eq_pos) = s.find('=') {
-                    let attr = s[..eq_pos].to_lowercase();
-                    let value = s[eq_pos + 1..].to_string();
+            Some('&') => Self::parse_list(&s[1..], Filter::And),
+            Some('|') => Self::parse_list(&s[1..], Filter::Or),
+            Some('!') => Ok(Filter::Not(Box::new(Self::parse_inner(&s[1..])?))),
+            _ => Self::parse_simple(s),
+        }
+    }
 
-                    let filter = match attr.as_str() {
-                        "objectclass" => Filter::Equality("objectClass".to_string(), value),
-                        "samaccountname" => Filter::Equality("sAMAccountName".to_string(), value),
-                        "cn" => Filter::Equality("cn".to_string(), value),
-                        "name" => Filter::Equality("name".to_string(), value),
-                        "mail" => Filter::Equality("mail".to_string(), value),
-                        "userprincipalname" => Filter::Equality("userPrincipalName".to_string(), value),
-                        _ if attr.ends_with(":dn") => {
-                            // Поддержка: cn:dn:=John
-                            Filter::ApproxMatch(attr, value)
-                        }
-                        _ => Filter::Equality(attr, value),
-                    };
+    fn parse_simple(s: &str) -> Result<Self, LdapFilterError> {
+        if let Some(eq_pos) = s.find('=') {
+            let attr = s[..eq_pos].to_string();
+            let value = s[eq_pos + 1..].to_string();
 
-                    Ok(filter)
-                } else if s.ends_with("=*") {
-                    let attr = &s[..s.len() - 2];
-                    Ok(Filter::Present(attr.to_string()))
-                } else {
-                    Err(LdapFilterError::InvalidSyntax)
+            if attr.ends_with(":dn") {
+                return Ok(Filter::Extensible {
+                    attr: attr.trim_end_matches(":dn").to_string(),
+                    rule: None,
+                    dn_attrs: true,
+                    value,
+                });
+            }
+            if let Some(rule_pos) = attr.rfind(':') {
+                let rule = &attr[rule_pos + 1..];
+                let base_attr = &attr[..rule_pos];
+                if rule.ends_with("Match") {
+                    return Ok(Filter::Extensible {
+                        attr: base_attr.to_string(),
+                        rule: Some(rule.to_string()),
+                        dn_attrs: false,
+                        value,
+                    });
                 }
             }
+
+            if value == "*" {
+                return Ok(Filter::Present(attr));
+            }
+
+            if value.contains('*') {
+                return Self::parse_substring(&attr, &value);
+            }
+
+            if attr.ends_with(">=") {
+                return Ok(Filter::GreaterOrEqual(attr.trim_end_matches(">=").to_string(), value));
+            }
+            if attr.ends_with("<=") {
+                return Ok(Filter::LessOrEqual(attr.trim_end_matches("<=").to_string(), value));
+            }
+
+            Ok(Filter::Equality(attr, value))
+        } else {
+            Err(LdapFilterError::InvalidSyntax)
         }
+    }
+
+    fn parse_substring(attr: &str, pattern: &str) -> Result<Self, LdapFilterError> {
+        let parts: Vec<&str> = pattern.split('*').collect();
+        let mut any = Vec::new();
+        let mut initial = None;
+        let mut final_ = None;
+
+        if !parts.is_empty() && !parts[0].is_empty() {
+            initial = Some(parts[0].to_string());
+        }
+        for part in &parts[1..parts.len() - 1] {
+            if !part.is_empty() {
+                any.push(part.to_string());
+            }
+        }
+        if let Some(last) = parts.last() {
+            if !last.is_empty() {
+                final_ = Some(last.to_string());
+            }
+        }
+
+        Ok(Filter::Substring {
+            attr: attr.to_string(),
+            initial,
+            any,
+            final_,
+        })
     }
 
     fn parse_list<F>(s: &str, constructor: F) -> Result<Filter, LdapFilterError>
     where
-        F: FnOnce(Vec<Filter>) -> Result<Filter, LdapFilterError>,
+        F: FnOnce(Vec<Filter>) -> Filter,
     {
         let mut filters = Vec::new();
         let mut depth = 0;
@@ -97,8 +135,7 @@ impl Filter {
                     depth -= 1;
                     if depth == 0 {
                         let substr = &s[start..=i];
-                        let filter = Filter::parse(substr)?;
-                        filters.push(filter);
+                        filters.push(Filter::parse(substr)?);
                     } else if depth < 0 {
                         return Err(LdapFilterError::InvalidSyntax);
                     }
@@ -111,34 +148,9 @@ impl Filter {
             return Err(LdapFilterError::InvalidSyntax);
         }
 
-        constructor(filters)
+        Ok(constructor(filters))
     }
 
-    /// Проверяет, соответствует ли объект фильтру
-    pub fn matches_user(&self, user: &User) -> bool {
-        match self {
-            Filter::Equality(attr, value) => match attr.as_str() {
-                "sAMAccountName" => user.username.eq_ignore_ascii_case(value),
-                "cn" | "name" => user.display_name.as_ref().map_or(false, |n| n.eq_ignore_ascii_case(value)),
-                "mail" | "email" => user.email.as_ref().map_or(false, |e| e.eq_ignore_ascii_case(value)),
-                "userPrincipalName" => user.user_principal_name.eq_ignore_ascii_case(value),
-                "objectClass" => matches_object_class(value, &["user", "person"]),
-                _ => false,
-            },
-            Filter::Present(attr) => match attr.as_str() {
-                "sAMAccountName" => !user.username.is_empty(),
-                "cn" | "name" => user.display_name.is_some(),
-                "mail" | "email" => user.email.is_some(),
-                _ => false,
-            },
-            Filter::And(filters) => filters.iter().all(|f| f.matches_user(user)),
-            Filter::Or(filters) => filters.iter().any(|f| f.matches_user(user)),
-            Filter::Not(filter) => !filter.matches_user(user),
-            _ => false,
-        }
-    }
-
-    /// Проверяет с учётом сервиса (например, tokenGroups)
     pub async fn matches_user_with_service(
         &self,
         user: &User,
@@ -146,12 +158,15 @@ impl Filter {
     ) -> Result<bool, LdapFilterError> {
         match self {
             Filter::Present(attr) if attr == "tokenGroups" => {
-                // tokenGroups всегда "присутствует", если запрошен
-                Ok(true)
+                let tokens = service.get_token_groups(user.id).await?;
+                Ok(!tokens.is_empty())
             }
-            Filter::Equality(attr, _) if attr == "tokenGroups" => {
-                // tokenGroups нельзя сравнивать по значению (упрощённо)
-                Ok(false)
+            Filter::Equality(attr, value) if attr == "memberOf" => {
+                let groups = service.find_groups_by_member(user.id).await?;
+                let target_dn = value.to_uppercase();
+                Ok(groups.iter().any(|g| {
+                    DirectoryService::generate_group_dn(&g.sam_account_name, &Domain::default()).to_uppercase() == target_dn
+                }))
             }
             Filter::And(filters) => {
                 for f in filters {
@@ -174,22 +189,53 @@ impl Filter {
         }
     }
 
-    pub fn matches_group(&self, group: &Group) -> bool {
+    pub fn matches_user(&self, user: &User) -> bool {
         match self {
             Filter::Equality(attr, value) => match attr.as_str() {
-                "sAMAccountName" => group.sam_account_name.eq_ignore_ascii_case(value),
-                "cn" | "name" => group.name.eq_ignore_ascii_case(value),
-                "objectClass" => matches_object_class(value, &["group"]),
+                "sAMAccountName" => user.username.eq_ignore_ascii_case(value),
+                "cn" | "name" => user.display_name.as_ref().map_or(false, |n| n.eq_ignore_ascii_case(value)),
+                "mail" | "email" => user.email.as_ref().map_or(false, |e| e.eq_ignore_ascii_case(value)),
+                "userPrincipalName" => user.user_principal_name.eq_ignore_ascii_case(value),
+                "objectClass" => matches_object_class(value, &["user", "person"]),
                 _ => false,
             },
+            Filter::Substring { attr, initial, any, final_ } => {
+                let text = match attr.as_str() {
+                    "sAMAccountName" => &user.username,
+                    "cn" | "name" => user.display_name.as_deref().unwrap_or(""),
+                    "mail" | "email" => user.email.as_deref().unwrap_or(""),
+                    _ => return false,
+                };
+                let mut matched = true;
+                if let Some(init) = initial {
+                    matched &= text.starts_with(init);
+                }
+                for part in any {
+                    matched &= text.contains(part);
+                }
+                if let Some(fin) = final_ {
+                    matched &= text.ends_with(fin);
+                }
+                matched
+            }
+            Filter::GreaterOrEqual(attr, value) => {
+                match attr.as_str() {
+                    "created_at" => user.created_at >= chrono::DateTime::parse_from_rfc3339(value).ok().unwrap_or_default(),
+                    _ => false,
+                }
+            }
+            Filter::LessOrEqual(attr, value) => {
+                match attr.as_str() {
+                    "created_at" => user.created_at <= chrono::DateTime::parse_from_rfc3339(value).ok().unwrap_or_default(),
+                    _ => false,
+                }
+            }
             Filter::Present(attr) => match attr.as_str() {
-                "sAMAccountName" => !group.sam_account_name.is_empty(),
-                "cn" | "name" => !group.name.is_empty(),
+                "sAMAccountName" => !user.username.is_empty(),
+                "cn" | "name" => user.display_name.is_some(),
+                "mail" | "email" => user.email.is_some(),
                 _ => false,
             },
-            Filter::And(filters) => filters.iter().all(|f| f.matches_group(group)),
-            Filter::Or(filters) => filters.iter().any(|f| f.matches_group(group)),
-            Filter::Not(filter) => !filter.matches_group(group),
             _ => false,
         }
     }
@@ -204,14 +250,3 @@ pub enum LdapFilterError {
     InvalidSyntax,
     NotImplemented,
 }
-
-impl std::fmt::Display for LdapFilterError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            LdapFilterError::InvalidSyntax => write!(f, "Invalid filter syntax"),
-            LdapFilterError::NotImplemented => write!(f, "Not implemented"),
-        }
-    }
-}
-
-impl std::error::Error for LdapFilterError {}

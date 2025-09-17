@@ -1,400 +1,375 @@
 // src/cli.rs
 
 use crate::directory_service::DirectoryService;
-use crate::models::*;
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use std::sync::Arc;
-use uuid::Uuid;
-use chrono::Utc;
-use futures::future::join_all;
 
-#[derive(Parser)]
-#[command(name = "mextdomen")]
-#[command(about = "Утилита управления Active Directory", long_about = None)]
-pub struct Cli {
-    #[arg(short, long, value_name = "FILE", default_value = "data")]
-    pub data_dir: String,
+/// Точка входа CLI — сам создаёт service
+pub async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
+    let config = load_config()?;
+    let key = decode_key(&config.master_key_hex)?;
+    
+    // Создаём сервис внутри CLI
+    let service = Arc::new(DirectoryService::open(&config.db_path, &key)?);
 
-    #[arg(short, long, value_name = "KEY", default_value = "0000000000000000000000000000000000000000000000000000000000000000")]
-    pub key: String,
+    let cli = Cli::parse();
 
-    #[command(subcommand)]
-    pub command: Commands,
+    match cli.command {
+        Command::User { cmd } => handle_user(cmd, &service).await?,
+        Command::Group { cmd } => handle_group(cmd, &service).await?,
+        Command::Ou { cmd } => handle_ou(cmd, &service).await?,
+        Command::Gpo { cmd } => handle_gpo(cmd, &service).await?,
+    }
+
+    Ok(())
 }
 
-#[derive(Subcommand, Clone)] // ✅ Добавлено Clone
-pub enum Commands {
+// === CLI ===
+
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(clap::Subcommand)]
+enum Command {
     /// Управление пользователями
     User {
         #[command(subcommand)]
-        action: UserCommands,
+        cmd: UserCommand,
     },
     /// Управление группами
     Group {
         #[command(subcommand)]
-        action: GroupCommands,
+        cmd: GroupCommand,
     },
-    /// Управление OU
+    /// Управление организационными подразделениями (OU)
     Ou {
         #[command(subcommand)]
-        action: OuCommands,
+        cmd: OuCommand,
     },
-    /// Управление доменом
-    Domain {
-        #[command(subcommand)]
-        action: DomainCommands,
-    },
-    /// Управление GPO
+    /// Управление групповыми политиками (GPO)
     Gpo {
         #[command(subcommand)]
-        action: GpoCommands,
+        cmd: GpoCommand,
     },
 }
 
-#[derive(Subcommand, Clone)] // ✅
-pub enum UserCommands {
+// === Подкоманды ===
+
+#[derive(clap::Subcommand)]
+enum UserCommand {
     Create {
         username: String,
-        #[arg(short, long)]
+        #[clap(short, long)]
         email: Option<String>,
-        #[arg(short, long)]
+        #[clap(short, long)]
         display_name: Option<String>,
-        #[arg(short, long)]
-        given_name: Option<String>,
-        #[arg(short, long)]
-        surname: Option<String>,
-        #[arg(short, long)]
-        ou: Option<String>,
-        #[arg(long, default_value = "513")]
-        primary_group: u32,
     },
-    List {
-        #[arg(long, action)]
-        json: bool,
-        #[arg(long, action)]
-        quiet: bool,
-    },
-    Show {
-        username: String,
-        #[arg(long, action)]
-        json: bool,
-    },
-    Delete {
-        username: String,
-        #[arg(long, action)]
-        quiet: bool,
-    },
-    Rename {
-        username: String,
-        #[arg(short, long)]
-        new_username: Option<String>,
-        #[arg(short, long)]
-        display_name: Option<String>,
-        #[arg(long, action)]
-        quiet: bool,
-    },
+    Get { username: String },
+    List { #[clap(short, long)] json: bool },
+    Delete { username: String },
 }
 
-#[derive(Subcommand, Clone)] // ✅
-pub enum GroupCommands {
+#[derive(clap::Subcommand)]
+enum GroupCommand {
     Create {
         name: String,
-        #[arg(short, long)]
+        #[clap(long)]
         sam_account_name: Option<String>,
     },
+    Get { sam: String },
     AddMember {
-        group: String,
-        user: String,
+        sam: String,
+        #[clap(long)]
+        user_id: uuid::Uuid,
     },
     RemoveMember {
-        group: String,
-        user: String,
+        sam: String,
+        #[clap(long)]
+        user_id: uuid::Uuid,
     },
-    ListMembers {
-        group: String,
-        #[arg(long, action)]
-        json: bool,
-        #[arg(long, action)]
-        quiet: bool,
-    },
-    Delete {
-        group: String,
-        #[arg(long, action)]
-        quiet: bool,
-    },
+    List { #[clap(short, long)] json: bool },
 }
 
-#[derive(Subcommand, Clone)] // ✅
-pub enum OuCommands {
+#[derive(clap::Subcommand)]
+enum OuCommand {
     Create {
         name: String,
-        #[arg(short, long)]
+        #[clap(long)]
         parent: Option<String>,
-    },
-    List {
-        #[arg(long, action)]
-        json: bool,
-        #[arg(long, action)]
-        quiet: bool,
-    },
-}
-
-#[derive(Subcommand, Clone)] // ✅
-pub enum DomainCommands {
-    Create {
-        name: String,
-        dns_name: String,
     },
     List,
 }
 
-#[derive(Subcommand, Clone)] // ✅
-pub enum GpoCommands {
+#[derive(clap::Subcommand)]
+enum GpoCommand {
+    Create {
+        name: String,
+        #[clap(long)]
+        display_name: Option<String>,
+        #[clap(long)]
+        description: Option<String>,
+        #[clap(long)]
+        linked_to: Vec<uuid::Uuid>,
+        #[clap(long)]
+        enforced: bool,
+        #[clap(long)]
+        enabled: bool,
+    },
+    List { #[clap(short, long)] json: bool },
     Link {
-        gpo_id: String,
-        to: String,
+        gpo_id: uuid::Uuid,
+        ou_id: uuid::Uuid,
     },
     Unlink {
-        gpo_id: String,
-        from: String,
+        gpo_id: uuid::Uuid,
+        ou_id: uuid::Uuid,
+    },
+    SetInheritance {
+        ou_id: uuid::Uuid,
+        block: bool,
+    },
+    SetEnforced {
+        ou_id: uuid::Uuid,
+        enforced: bool,
     },
 }
 
-impl Cli {
-    pub async fn run(self) -> Result<(), Box<dyn std::error::Error>> {
-        let key = Self::parse_key(&self.key)?;
-        let service = Arc::new(DirectoryService::open(&self.data_dir, &key)?);
+// === Конфигурация ===
 
-        // ✅ Убрано `ref action`, потому что теперь `action: UserCommands` можно переместить
-        match self.command.clone() {
-            Commands::User { action } => self.handle_user(action.clone(), &service).await?,
-            Commands::Group { action } => self.handle_group(action.clone(), &service).await?,
-            Commands::Ou { action } => self.handle_ou(action.clone(), &service).await?,
-            Commands::Domain { action } => self.handle_domain(action.clone(), &service).await?,
-            Commands::Gpo { action } => self.handle_gpo(action.clone(), &service).await?,
+/// Конфигурация из `config.yaml`
+#[derive(serde::Deserialize)]
+struct Config {
+    db_path: String,
+    master_key_hex: String,
+}
+
+fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
+    let file = std::fs::File::open("config.yaml")?;
+    let config: Config = serde_yaml::from_reader(file)?;
+    Ok(config)
+}
+
+fn decode_key(hex: &str) -> Result<[u8; 32], hex::FromHexError> {
+    let mut key = [0u8; 32];
+    hex::decode_to_slice(hex, &mut key)?;
+    Ok(key)
+}
+
+// === Обработчики ===
+
+async fn handle_user(
+    cmd: UserCommand,
+    service: &DirectoryService,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match cmd {
+        UserCommand::Create { username, email, display_name } => {
+            use crate::models::{User, SecurityIdentifier, PasswordHash, PasswordAlgorithm};
+            let user = User {
+                id: uuid::Uuid::new_v4(),
+                sid: SecurityIdentifier::new_nt_authority(1001),
+                username,
+                user_principal_name: "placeholder@corp.acme.com".to_string(),
+                email,
+                display_name,
+                given_name: None,
+                surname: None,
+                password_hash: PasswordHash {
+                    hash: "default".to_string(),
+                    algorithm: PasswordAlgorithm::Bcrypt,
+                    salt: vec![],
+                },
+                password_expires: None,
+                last_password_change: chrono::Utc::now(),
+                lockout_until: None,
+                failed_logins: 0,
+                enabled: true,
+                mfa_enabled: false,
+                mfa_methods: vec![],
+                domains: vec![],
+                groups: vec![],
+                organizational_unit: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                last_login: None,
+                profile_path: None,
+                script_path: None,
+                meta: std::collections::HashMap::new(),
+                primary_group_id: Some(513),
+            };
+            service.create_user(&user).await?;
+            println!("✅ Пользователь создан: {}", user.username);
         }
-
-        Ok(())
-    }
-
-    async fn handle_user(&self, cmd: UserCommands, service: &DirectoryService) -> Result<(), Box<dyn std::error::Error>> {
-        match cmd {
-            UserCommands::Create { username, email, display_name, given_name, surname, ou: ref _ou, primary_group } => { // ✅ `ref _ou`
-                let domain_users_id = Uuid::from_u128(0x513);
-                let _domain_users = service.get_group(domain_users_id).await?
-                    .ok_or("Domain Users group not found")?;
-
-                let user = User {
-                    id: Uuid::new_v4(),
-                    sid: SecurityIdentifier::new_nt_authority(1001),
-                    username: username.clone(),
-                    user_principal_name: format!("{}@corp.acme.com", username),
-                    email,
-                    display_name,
-                    given_name,
-                    surname,
-                    password_hash: PasswordHash::new_bcrypt("P@ssw0rd!")?,
-                    password_expires: None,
-                    last_password_change: Utc::now(),
-                    lockout_until: None,
-                    failed_logins: 0,
-                    enabled: true,
-                    mfa_enabled: false,
-                    mfa_methods: vec![],
-                    domains: vec![],
-                    groups: vec![domain_users_id],
-                    organizational_unit: None,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
-                    last_login: None,
-                    profile_path: None,
-                    script_path: None,
-                    meta: std::collections::HashMap::new(),
-                    primary_group_id: Some(primary_group),
-                };
-
-                service.create_user(&user).await?;
-                service.add_member_to_group(domain_users_id, user.id).await?;
-
-                println!("✅ User {} created and added to Domain Users", user.username);
+        UserCommand::Get { username } => {
+            if let Some(user) = service.find_user_by_username(&username).await? {
+                println!("{:#?}", user);
+            } else {
+                eprintln!("❌ Пользователь не найден");
             }
-            UserCommands::List { json, quiet } => {
-                let users = service.get_all_users().await?;
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&users)?);
-                } else if !quiet {
-                    println!("📋 Users:");
-                    for user in &users {
-                        let name = user.display_name.as_deref().unwrap_or("No Name");
-                        println!("  - {} ({})", user.username, name);
-                    }
-                    println!("Total: {} users", users.len());
+        }
+        UserCommand::List { json } => {
+            let users = service.get_all_users().await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&users)?);
+            } else {
+                for user in users {
+                    println!("{} | {}", user.username, user.id);
                 }
             }
-            UserCommands::Show { username, json } => {
-                if let Some(user) = service.find_user_by_username(&username).await? {
-                    if json {
-                        println!("{}", serde_json::to_string_pretty(&user)?);
-                    } else {
-                        println!("{}", serde_json::to_string_pretty(&user)?);
-                    }
-                } else {
-                    eprintln!("❌ User not found: {}", username);
-                }
-            }
-            UserCommands::Delete { username, quiet } => {
-                let user = service.find_user_by_username(&username).await?
-                    .ok_or("User not found")?;
-
+        }
+        UserCommand::Delete { username } => {
+            if let Some(user) = service.find_user_by_username(&username).await? {
                 service.delete_user(user.id).await?;
-
-                if !quiet {
-                    println!("✅ User {} deleted", username);
-                }
-            }
-            UserCommands::Rename { username, new_username, display_name, quiet } => {
-                let user = service.find_user_by_username(&username).await?
-                    .ok_or("User not found")?;
-
-                service.rename_user(user.id, new_username.clone(), display_name.clone()).await?;
-
-                if !quiet {
-                    println!("✅ User {} renamed", username);
-                }
+                println!("✅ Пользователь удалён: {}", username);
+            } else {
+                eprintln!("❌ Пользователь не найден");
             }
         }
-        Ok(())
     }
+    Ok(())
+}
 
-    async fn handle_group(&self, cmd: GroupCommands, service: &DirectoryService) -> Result<(), Box<dyn std::error::Error>> {
-        match cmd {
-            GroupCommands::Create { name, sam_account_name } => {
-                let sam = sam_account_name.unwrap_or_else(|| name.to_uppercase());
-                let group = Group::new(
-                    name.clone(),
-                    sam,
-                    Uuid::nil(),
-                    GroupTypeFlags::SECURITY,
-                    GroupScope::Global,
-                );
-                service.create_group(&group).await?;
-                println!("✅ Group {} created", group.name);
+async fn handle_group(
+    cmd: GroupCommand,
+    service: &DirectoryService,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match cmd {
+        GroupCommand::Create { name, sam_account_name } => {
+            use crate::models::{Group, GroupTypeFlags, GroupScope};
+            let sam = sam_account_name.unwrap_or_else(|| name.to_uppercase());
+            let group = Group::new(name, sam, uuid::Uuid::nil(), GroupTypeFlags::SECURITY, GroupScope::Global);
+            service.create_group(&group).await?;
+            println!("✅ Группа создана: {}", group.sam_account_name);
+        }
+        GroupCommand::Get { sam } => {
+            if let Some(group) = service.find_group_by_sam_account_name(&sam).await? {
+                println!("{:#?}", group);
+            } else {
+                eprintln!("❌ Группа не найдена");
             }
-            GroupCommands::AddMember { group, user } => {
-                let group_obj = service.find_group_by_sam_account_name(&group).await?
-                    .ok_or("Group not found")?;
-                let user_obj = service.find_user_by_username(&user).await?
-                    .ok_or("User not found")?;
-
-                service.add_member_to_group(group_obj.id, user_obj.id).await?;
-                println!("✅ {} added to {}", user, group);
+        }
+        GroupCommand::AddMember { sam, user_id } => {
+            if let Some(group) = service.find_group_by_sam_account_name(&sam).await? {
+                service.add_member_to_group(group.id, user_id).await?;
+                println!("✅ Участник добавлен в группу");
+            } else {
+                eprintln!("❌ Группа не найдена");
             }
-            GroupCommands::RemoveMember { group, user } => {
-                let group_obj = service.find_group_by_sam_account_name(&group).await?
-                    .ok_or("Group not found")?;
-                let user_obj = service.find_user_by_username(&user).await?
-                    .ok_or("User not found")?;
-
-                service.remove_member_from_group(group_obj.id, user_obj.id).await?;
-                println!("✅ {} removed from {}", user, group);
+        }
+        GroupCommand::RemoveMember { sam, user_id } => {
+            if let Some(group) = service.find_group_by_sam_account_name(&sam).await? {
+                service.remove_member_from_group(group.id, user_id).await?;
+                println!("✅ Участник удалён из группы");
+            } else {
+                eprintln!("❌ Группа не найдена");
             }
-            GroupCommands::ListMembers { group, json, quiet } => {
-                let group_obj = service.find_group_by_sam_account_name(&group).await?
-                    .ok_or("Group not found")?;
-
-                // ✅ async move
-                let members: Vec<String> = join_all(
-                    group_obj.members.iter().map(|&id| async move {
-                        service.get_user(id).await.ok().flatten().map(|u| u.username)
-                    })
-                ).await.into_iter().flatten().collect();
-
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&members)?);
-                } else if !quiet {
-                    println!("👥 Members of '{}':", group_obj.name);
-                    for username in &members {
-                        println!("  - {}", username);
-                    }
-                    println!("Total: {} members", members.len());
-                }
-            }
-            GroupCommands::Delete { group, quiet } => {
-                let group_obj = service.find_group_by_sam_account_name(&group).await?
-                    .ok_or("Group not found")?;
-
-                service.delete_group(group_obj.id).await?;
-
-                if !quiet {
-                    println!("✅ Group {} deleted", group);
+        }
+        GroupCommand::List { json } => {
+            let groups = service.get_all_groups().await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&groups)?);
+            } else {
+                for group in groups {
+                    println!("{} ({}) — {} участников", group.name, group.sam_account_name, group.members.len());
                 }
             }
         }
-        Ok(())
     }
+    Ok(())
+}
 
-    async fn handle_ou(&self, cmd: OuCommands, service: &DirectoryService) -> Result<(), Box<dyn std::error::Error>> {
-        match cmd {
-            OuCommands::Create { name, parent } => {
-                let dn = DirectoryService::generate_ou_dn(&name, parent.as_deref());
-                let ou = OrganizationalUnit::new(name, dn, None);
-                service.create_ou(&ou).await?;
-                println!("✅ OU created: {}", ou.dn);
+async fn handle_ou(
+    cmd: OuCommand,
+    service: &DirectoryService,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match cmd {
+        OuCommand::Create { name, parent } => {
+            let dn = crate::directory_service::DirectoryService::generate_ou_dn(&name, parent.as_deref());
+            let ou = crate::models::OrganizationalUnit::new(name, dn, None);
+            service.create_ou(&ou).await?;
+            println!("✅ OU создана: DN={}", ou.dn);
+        }
+        OuCommand::List => {
+            let ous = service.get_all_ous().await?;
+            for ou in ous {
+                println!("OU={}, DN={}", ou.name, ou.dn);
             }
-            OuCommands::List { json, quiet } => {
-                let ous = service.get_all_ous().await?;
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&ous)?);
-                } else if !quiet {
-                    println!("📁 Organizational Units:");
-                    for ou in &ous {
-                        println!("  - {} (DN: {})", ou.name, ou.dn);
-                    }
-                    println!("Total: {} OUs", ous.len());
+        }
+    }
+    Ok(())
+}
+
+async fn handle_gpo(
+    cmd: GpoCommand,
+    service: &DirectoryService,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match cmd {
+        GpoCommand::Create {
+            name,
+            display_name,
+            description,
+            linked_to,
+            enforced,
+            enabled,
+        } => {
+            use crate::models::policy::{GroupPolicy, PolicyType, PolicyTarget};
+
+            let gpo = GroupPolicy {
+                id: uuid::Uuid::new_v4(),
+                name,
+                display_name,
+                description,
+                linked_to,
+                enforced,
+                security_filtering: vec![],
+                order: 0,
+                version: 1,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                enabled,
+                policy_type: PolicyType::Custom("Custom".to_string()),
+                target: PolicyTarget::All,
+                settings: std::collections::HashMap::new(),
+                wmi_filter: None,
+            };
+
+            service.create_gpo(&gpo).await?;
+            println!("✅ GPO создана: ID={}", gpo.id);
+        }
+        GpoCommand::List { json } => {
+            let gpos = service.get_all_gpos().await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&gpos)?);
+            } else {
+                for gpo in &gpos {
+                    println!(
+                        "GPO(id={}, name={}, enabled={})",
+                        gpo.id,
+                        gpo.name,
+                        gpo.enabled
+                    );
                 }
             }
         }
-        Ok(())
-    }
-
-    async fn handle_domain(&self, cmd: DomainCommands, service: &DirectoryService) -> Result<(), Box<dyn std::error::Error>> {
-        match cmd {
-            DomainCommands::Create { name, dns_name } => {
-                let domain = Domain::new_with_defaults(
-                    name,
-                    dns_name,
-                    SecurityIdentifier::new_nt_authority(512),
-                );
-                service.create_domain(&domain).await?;
-                println!("✅ Domain {} created", domain.dns_name);
-            }
-            DomainCommands::List => {
-                println!("Domain list: not implemented");
-            }
+        GpoCommand::Link { gpo_id, ou_id } => {
+            service.link_gpo_to_ou(gpo_id, ou_id).await?;
+            println!("✅ GPO привязана к OU");
         }
-        Ok(())
-    }
-
-    async fn handle_gpo(&self, cmd: GpoCommands, _service: &DirectoryService) -> Result<(), Box<dyn std::error::Error>> {
-        match cmd {
-            GpoCommands::Link { gpo_id, to: _to } => {
-                let _gpo_id = Uuid::parse_str(&gpo_id)?;
-                println!("GPO link: not implemented");
-            }
-            GpoCommands::Unlink { gpo_id: _gpo_id, from: _from } => {
-                println!("GPO unlink: not implemented");
-            }
+        GpoCommand::Unlink { gpo_id, ou_id } => {
+            service.unlink_gpo_from_ou(gpo_id, ou_id).await?;
+            println!("✅ GPO отвязана от OU");
         }
-        Ok(())
-    }
-
-    pub fn parse_key(key_str: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
-        if key_str.len() >= 32 {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&key_str.as_bytes()[..32]);
-            Ok(arr)
-        } else {
-            Err("Key must be at least 32 bytes".into())
+        GpoCommand::SetInheritance { ou_id, block } => {
+            service.set_block_inheritance(ou_id, block).await?;
+            println!("✅ Наследование GPO {}: {}", if block { "заблокировано" } else { "разрешено" }, ou_id);
+        }
+        GpoCommand::SetEnforced { ou_id, enforced } => {
+            service.set_gpo_enforced(ou_id, enforced).await?;
+            println!("✅ GPO принудительно применяемая: {} для OU {}", enforced, ou_id);
         }
     }
+    Ok(())
 }

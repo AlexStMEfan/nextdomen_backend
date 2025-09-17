@@ -1,0 +1,3 @@
+# config.yaml
+db_path: "data/raddb.bin"
+master_key_hex: "a1b2c3d4e5f67890a1b2c3d4e5f67890a1b2c3d4e5f67890a1b2c3d4e5f67890"

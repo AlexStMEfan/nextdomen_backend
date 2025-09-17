@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package audit_api;
+
+service AuditLogService {
+  rpc GetEvents(GetEventsRequest) returns (GetEventsResponse);
+  rpc StreamEvents(StreamEventsRequest) returns (stream AuditEvent);
+}
+
+message AuditEvent {
+  string id = 1;
+  string action = 2; // "user.create", "login.success"
+  string actor_id = 3; // кто совершил действие
+  string target_id = 4; // на кого направлено
+  string ip_address = 5;
+  map<string, string> metadata = 6;
+  int64 timestamp = 7;
+}
+
+message GetEventsRequest {
+  string action = 1;
+  string actor_id = 2;
+  int64 from = 3;
+  int64 to = 4;
+  int32 limit = 5;
+}
+
+message GetEventsResponse {
+  repeated AuditEvent events = 1;
+}
+
+message StreamEventsRequest {}

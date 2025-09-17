@@ -1,9 +1,0 @@
-Package: nextdomen
-Version: 0.1.0
-Section: utils
-Priority: optional
-Architecture: amd64
-Depends: libc6 (>= 2.31)
-Maintainer: Alex Ef <alex@example.com>
-Description: NextDomen Rust backend service
- A backend service for nextDomen project, packed as DEB.

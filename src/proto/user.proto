@@ -1,0 +1,48 @@
+// proto/user.proto
+
+syntax = "proto3";
+
+package user_api;
+
+service UserApi {
+  rpc GetUser(GetUserRequest) returns (GetUserResponse);
+  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+  rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
+}
+
+message GetUserRequest {
+  string username = 1;
+}
+
+message GetUserResponse {
+  string id = 1;
+  string username = 2;
+  string email = 3;
+  string display_name = 4;
+  int64 created_at = 5; // Unix timestamp
+}
+
+message ListUsersRequest {}
+
+message ListUsersResponse {
+  repeated GetUserResponse users = 1;
+}
+
+message CreateUserRequest {
+  string username = 1;
+  string email = 2;
+  string display_name = 3;
+}
+
+message CreateUserResponse {
+  string id = 1;
+}
+
+message UserResponse {
+  string id = 1;
+  string username = 2;
+  string email = 3;
+  string display_name = 4;
+  string org_id = 5; // ← новое поле
+  int64 created_at = 6;
+}
